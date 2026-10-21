@@ -8,6 +8,7 @@ namespace MinHook {
     internal enum ContextUpdateResult { Success, CaptureFailed, UnmappedInstruction, ApplyFailed }
 
     // WinNT.h CONTEXT layouts, Windows SDK 10.0.26100.0. Only CONTEXT_CONTROL is requested.
+    // Keep these layouts and Snapshot in sync with the native helper. Other CPU ABIs need their own layouts.
     internal sealed unsafe class ThreadContextBuffer : IDisposable {
         internal const int X86ContextSize = 716;
         internal const int X64ContextSize = 1232;
@@ -57,6 +58,7 @@ namespace MinHook {
         internal ulong FailedInstructionPointer { get; private set; }
 
         internal void Prepare(int count, int hookCount = 1) {
+            // Grow buffers before stopping threads. Allocation here is setup work, not part of the frozen path.
             if (disposed) throw new ObjectDisposedException(nameof(ThreadContextBuffer));
             SYSTEM_INFO info = default;
             GetSystemInfo(ref info);
@@ -165,6 +167,7 @@ namespace MinHook {
         }
 
         internal static Exception CreateException(NativeThreadResult result) {
+            // Rollback or resume can fail too. Keep those errors visible; retrying or freeing code blindly is unsafe.
             string message = "Native thread transaction failed: " + result.Status;
             if (result.RollbackError != 0) message += "; context rollback failed with Win32 error " + result.RollbackError;
             if (result.ResumeError != 0) message += "; thread resume failed with Win32 error " + result.ResumeError;

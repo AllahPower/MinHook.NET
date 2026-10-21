@@ -443,6 +443,7 @@ namespace MinHook.Tests {
         }
 
         static void ContextUpdatesDoNotAllocateAfterWarmup() {
+            // This measures prepared buffers and transactions, not hook creation or thread enumeration.
             using var worker = new NativeWorker();
             using var allocator = new MemoryAllocator();
             using var buffer = new ThreadContextBuffer();

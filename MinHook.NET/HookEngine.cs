@@ -6,6 +6,8 @@ using static MinHook.Utils;
 
 namespace MinHook {
     public sealed class HookEngine : IDisposable {
+        // Locks below protect one engine only. Do not update separate engines at the same time.
+        // TODO: Add a shared gate before collecting threads or changing patches.
         const int ErrorInvalidParameter = 87;
 
         MemoryAllocator memoryAllocator = new MemoryAllocator();
@@ -123,6 +125,8 @@ namespace MinHook {
                 throw new NotSupportedException("Changing hooks while a managed debugger is attached is not supported.");
             }
 
+            // This snapshot misses threads created later. Stop new callers while changing hooks.
+            // TODO: Coordinate thread creation if patching must work without that caller guarantee.
             // Finish managed enumeration and buffer growth before suspending any thread.
             using (Process currentProc = Process.GetCurrentProcess()) {
                 foreach (ProcessThread thread in currentProc.Threads) {
@@ -153,6 +157,9 @@ namespace MinHook {
             if (error != 0) throw new System.ComponentModel.Win32Exception(error);
         }
 
+        // Stop new calls and wait for active detours and original calls before entering here.
+        // Moving IP does not fix return addresses left on a callee's stack. Do not dispose inside a detour.
+        // TODO: Add call draining; saved original delegates must not be used after disposal.
         public void Dispose() {
             lock (this) {
                 if (disposed) return;

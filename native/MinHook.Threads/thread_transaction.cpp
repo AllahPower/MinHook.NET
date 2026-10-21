@@ -109,6 +109,7 @@ bool MapIp(const HookPlan& hook, uint64_t ip, bool enable, uint64_t& mapped) noe
     }
     const auto patchStart = hook.patchAbove ? target - RelativeJumpSize : target;
     const auto patchEnd = target + (hook.patchAbove ? ShortJumpSize : RelativeJumpSize);
+    // Do not round an unknown IP to a nearby instruction. New trampoline sequences need explicit mappings.
     if (ip >= patchStart && ip < patchEnd) return false;
     return enable || ip < trampoline || ip >= trampoline + MemorySlotSize;
 }
@@ -170,6 +171,7 @@ void Patch(const HookPlan& hook, bool enable, Result& result) noexcept {
     for (unsigned i = 0; i < sizeof(displacement); ++i) expected[i + 1] = static_cast<uint8_t>(displacement >> (i * 8));
     expected[RelativeJumpSize] = 0xEB;
     expected[RelativeJumpSize + 1] = static_cast<uint8_t>(-static_cast<int>(RelativeJumpSize + ShortJumpSize));
+    // Another hook may own these bytes. Remove newer hooks first; do not overwrite their patch.
     for (unsigned i = 0; i < size; ++i) {
         if (patch[i] != (enable ? hook.backup[i] : expected[i])) { result.status = PatchChanged; return; }
     }
@@ -227,6 +229,7 @@ API void __cdecl mh_execute(ThreadEntry* threads, uint32_t count, const HookPlan
             result->status = InvalidInput; result->error = ERROR_INVALID_PARAMETER; return;
         }
     }
+    // Keep everything through the resume loop native. Managed code can wait on a CLR thread we just stopped.
     uint32_t suspended = 0, applied = 0;
     for (; suspended < count; ++suspended) {
         if (threads[suspended].exited) continue;
@@ -241,8 +244,10 @@ API void __cdecl mh_execute(ThreadEntry* threads, uint32_t count, const HookPlan
     if (result->status == Success) Apply(threads, count, applied, *result);
     if (result->status == Success && writePatch) {
         Patch(hooks[0], enable != 0, *result);
+        // If bytes changed but protection or cache flush failed, IPs must still match the new bytes.
         if (result->status != Success && !result->patchWritten) result->rollbackError = Rollback(threads, applied);
     }
+    // Undo only our suspension. Another caller may already have stopped the same thread.
     // No managed code, callbacks, heap allocation, or exception construction before this completes.
     for (uint32_t i = 0; i < suspended; ++i) {
         if (!threads[i].suspended) continue;

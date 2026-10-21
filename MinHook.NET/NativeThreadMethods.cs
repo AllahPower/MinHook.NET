@@ -26,6 +26,8 @@ namespace MinHook {
     }
 
     internal static class NativeThreadMethods {
+        // Ship this DLL with the managed assembly, using the process bitness, not the OS bitness.
+        // Direct DLL references must copy it to build and publish output themselves.
         const string Library = "MinHook.Threads.dll";
 
         [DllImport(Library, CallingConvention = CallingConvention.Cdecl, ExactSpelling = true)]
