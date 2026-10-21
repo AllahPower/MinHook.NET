@@ -8,7 +8,7 @@ using static MinHook.Utils;
 namespace MinHook.Tests {
     public unsafe class NativeTests {
         public static bool Is64Bit => IntPtr.Size == 8;
-        private sealed class CodePage : IDisposable {
+        internal sealed class CodePage : IDisposable {
             public readonly IntPtr Address = VirtualAlloc(IntPtr.Zero, (IntPtr)4096,
                 AllocationType.Commit | AllocationType.Reserve, MemoryProtection.ExecuteReadWrite);
 
