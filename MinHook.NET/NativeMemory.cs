@@ -3,6 +3,18 @@ using System.Runtime.InteropServices;
 
 namespace MinHook {
     internal static unsafe class NativeMemory {
+        internal static ref T AsRef<T>(IntPtr address) where T : unmanaged {
+#if NETFRAMEWORK
+            return ref *(T*)address;
+#else
+            return ref MemoryMarshal.GetReference(MemoryMarshal.Cast<byte, T>(new Span<byte>((void*)address, sizeof(T))));
+#endif
+        }
+
+        internal static ulong Address(IntPtr value) {
+            return IntPtr.Size == 8 ? unchecked((ulong)value.ToInt64()) : unchecked((uint)value.ToInt32());
+        }
+
         internal static void Write<T>(IntPtr destination, ref T value) where T : unmanaged {
 #if NETFRAMEWORK
             fixed (T* valuePointer = &value) {

@@ -157,6 +157,10 @@ namespace MinHook {
         public byte[] OldInstructionBoundaries { get; private set; } = new byte[64];
         public byte[] NewInstructionBoundaries { get; private set; } = new byte[64];
         public byte[] Backup { get; private set; } = new byte[8];
+        ulong absoluteCalls;
+        ulong absoluteConditionalJumps;
+
+        internal const int IndirectBranchInstructionSize = sizeof(ushort) + sizeof(int);
 
         public readonly int TrampolineMaxSize = MemoryBlock.MemorySlotSize - (IntPtr.Size == 8 ? AbsoluteJumpSize : 0);
 
@@ -233,6 +237,7 @@ namespace MinHook {
 
                     if (inst.Operands[0].Size != 32) throw new NotSupportedException("Only rel32 calls are supported");
                     copySize = WriteCall(instBuf, newInst, dest, is64);
+                    if (is64) absoluteCalls |= 1UL << (int)InstructionBoundaries;
                     copySrc = instBuf;
 
                 }else if( (opcode & 0xFD) == 0xE9) {
@@ -284,6 +289,7 @@ namespace MinHook {
 
                         byte cond = (byte)((opcode != 0x0F ? opcode : Marshal.ReadByte(oldInst, opcodeOffset + 1)) & 0x0F);
                         copySize = WriteConditionalJump(instBuf, newInst, dest, cond, is64);
+                        if (is64) absoluteConditionalJumps |= 1UL << (int)InstructionBoundaries;
                         copySrc = instBuf;
                     }
 
@@ -353,6 +359,33 @@ namespace MinHook {
 
             } else {
                 Marshal.Copy(Target, Backup, 0, RelativeJumpSize);
+            }
+        }
+
+        // Boundary mapping follows MinHook v1.3.4 FindOldIP/FindNewIP, with explicit
+        // continuations for the extra instructions emitted by x64 CALL/Jcc expansion.
+        internal bool TryMapInstructionPointer(ulong ip, bool enable, bool targetIsPatched, out ulong mapped) {
+            NativeHookPlan plan = default;
+            WriteNativePlan(ref plan, targetIsPatched);
+            return NativeThreadMethods.mh_map_ip(ref plan, ip, enable ? 1 : 0, out mapped) != 0;
+        }
+
+        internal void WriteNativePlan(ref NativeHookPlan plan, bool enabled) {
+            plan.Target = Target;
+            plan.Trampoline = Tramp;
+            plan.Relay = Relay;
+            plan.Destination = IntPtr.Size == 8 ? Relay : Detour;
+            plan.AbsoluteCalls = absoluteCalls;
+            plan.AbsoluteConditionalJumps = absoluteConditionalJumps;
+            plan.BoundaryCount = InstructionBoundaries;
+            plan.PatchAbove = PatchAbove ? 1U : 0U;
+            plan.Enabled = enabled ? 1U : 0U;
+            fixed (NativeHookPlan* value = &plan) {
+                for (int i = 0; i < 64; i++) {
+                    value->OldIps[i] = OldInstructionBoundaries[i];
+                    value->NewIps[i] = NewInstructionBoundaries[i];
+                }
+                for (int i = 0; i < 8; i++) value->Backup[i] = Backup[i];
             }
         }
 
