@@ -40,11 +40,48 @@ Simple example demonstrating the hooking of the MessageBoxW Windows API
     }
 ```
 
-## TOOO
+## Native Hook Safety
 
-* Figure out how to calculate imm length with ModRM based instructions
+Keep the engine alive for as long as any detour or original delegate can be called.
+Stop callers and wait for in-flight calls to finish before disposing the engine.
+Disabling an inline patch is not a callback-draining mechanism. A delegate returned
+by `CreateHook` is invalid after its owning engine is disposed.
+
+Layers created by one engine are disabled in reverse creation order. Disabling an
+older layer while another engine or library owns the current patch is rejected
+without modifying the newer patch. Remove the newer layer first, then retry.
+Changes while a managed debugger is attached are rejected rather than silently
+patching running threads without suspension.
+
+Thread instruction pointers are not yet redirected when they point inside a
+patched prologue or trampoline. Concurrent patching and disposal therefore still
+require a separate thread-context fix; this branch does not claim to solve it.
+The managed suspension path also does not establish a process-wide GC-safe
+critical section or synchronize independent engines.
+
+## Regression Tests
+
+The native regression suite uses xUnit v3 and Windows executable-memory fixtures.
+No game process, UI dialog, or external native binary is required. Run both process
+architectures with matching dotnet hosts:
+
+```powershell
+dotnet build tests/MinHook.NET.Tests/MinHook.NET.Tests.csproj -c Release -p:TargetFrameworks=net9.0 -p:PlatformTarget=x64 -p:GeneratePackageOnBuild=false
+dotnet tests/MinHook.NET.Tests/bin/x64/Release/net9.0/MinHook.NET.Tests.dll
+dotnet build tests/MinHook.NET.Tests/MinHook.NET.Tests.csproj -c Release -p:TargetFrameworks=net9.0 -p:PlatformTarget=x86 -p:GeneratePackageOnBuild=false
+& "${env:ProgramFiles(x86)}/dotnet/dotnet.exe" tests/MinHook.NET.Tests/bin/x86/Release/net9.0/MinHook.NET.Tests.dll
+```
+
+The allocation test covers warmed-up patch/restore operations, not hook creation
+or process-thread enumeration. Instruction encodings use stack buffers and typed
+native writes: MemoryMarshal on .NET and .NET Standard, fixed pointers on .NET
+Framework. No runtime fallback or new library package dependency is introduced.
+
+## TODO
+
 * When enabling hooks, enumerate threads and update thread context if any are running at the hook instructions that are being patched
-* Implement unit tests
+* Redirect thread instruction pointers when disabling hooks before freeing trampolines
+* Add concurrent native-worker stress tests in isolated child processes
 
 ## Thanks
 
