@@ -85,7 +85,7 @@ namespace MinHook {
         [DllImport("kernel32.dll", SetLastError = true)]
         public static extern void GetSystemInfo(ref SYSTEM_INFO Info);
 
-        [DllImport("kernel32.dll")]
+        [DllImport("kernel32.dll", SetLastError = true)]
         public static extern bool VirtualProtect(IntPtr lpAddress, UIntPtr dwSize, MemoryProtection flNewProtect, out MemoryProtection oldProtect);
 
         [DllImport("kernel32.dll", SetLastError = true, ExactSpelling = true)]
@@ -122,7 +122,7 @@ namespace MinHook {
         [DllImport("kernel32.dll", SetLastError = true)]
         public static extern uint ResumeThread(IntPtr hThread);
 
-        [DllImport("kernel32.dll")]
+        [DllImport("kernel32.dll", SetLastError = true)]
         public static extern bool FlushInstructionCache(IntPtr hProcess, IntPtr lpBaseAddress, UIntPtr dwSize);
     }
 }

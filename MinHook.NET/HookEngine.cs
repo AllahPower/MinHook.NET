@@ -11,6 +11,10 @@ namespace MinHook {
         Dictionary<Delegate, Hook> originalHookMapping = new Dictionary<Delegate, Hook>();
         Dictionary<Delegate, Hook> detourHookMapping = new Dictionary<Delegate, Hook>();
         List<IntPtr> suspendedThreads = new List<IntPtr>();
+        // Dictionary enumeration order is not guaranteed on .NET Framework.
+        readonly List<Hook> hooksInCreationOrder = new List<Hook>();
+        bool disposed;
+        int suspendedThreadCount;
 
         public Func CreateHook<Func>(string dll, string function, Func detour) where Func : Delegate {
 
@@ -29,89 +33,137 @@ namespace MinHook {
             }
 
             lock (this) {
-                var hook = new Hook(target, Marshal.GetFunctionPointerForDelegate(detour), memoryAllocator.AllocateBuffer(target));
-                Func original = (Func)Marshal.GetDelegateForFunctionPointer(hook.Original, typeof(Func));
-                originalHookMapping.Add(original, hook);
-
-                //Main purpose of this is to make sure the detour delegate
-                //does not get garbage collected for the lifetime of the hook
-                detourHookMapping.Add(detour, hook);
-                return original;
+                ThrowIfDisposed();
+                if (detourHookMapping.ContainsKey(detour)) throw new ArgumentException("Detour is already registered", nameof(detour));
+                MemorySlot slot = memoryAllocator.AllocateBuffer(target);
+                try {
+                    var hook = new Hook(target, Marshal.GetFunctionPointerForDelegate(detour), slot);
+                    Func original = (Func)Marshal.GetDelegateForFunctionPointer(hook.Original, typeof(Func));
+                    originalHookMapping.Add(original, hook);
+                    try {
+                        detourHookMapping.Add(detour, hook);
+                        hooksInCreationOrder.Add(hook);
+                    } catch {
+                        originalHookMapping.Remove(original);
+                        detourHookMapping.Remove(detour);
+                        throw;
+                    }
+                    return original;
+                } catch {
+                    memoryAllocator.FreeBuffer(slot);
+                    throw;
+                }
             }
         }
 
         public void EnableHooks() {
-            foreach(var hook in originalHookMapping) {
-                EnableHook(hook.Key);
+            lock (this) {
+                ThrowIfDisposed();
+                foreach (Hook hook in hooksInCreationOrder) SetHookState(hook, true);
             }
         }
 
         public void DisableHooks() {
-            foreach (var hook in originalHookMapping) {
-                DisableHook(hook.Key);
+            lock (this) {
+                ThrowIfDisposed();
+                for (int i = hooksInCreationOrder.Count - 1; i >= 0; i--) SetHookState(hooksInCreationOrder[i], false);
             }
         }
 
         public void EnableHook(Delegate original) {
             lock (this) {
+                ThrowIfDisposed();
                 if (!originalHookMapping.ContainsKey(original)) {
                     throw new KeyNotFoundException("Hook not found, was this delegate create with CreateHook?");
                 }
 
-                SuspendThreads();
-                originalHookMapping[original].Enable(true);
-                ResumeThreads();
+                SetHookState(originalHookMapping[original], true);
             }
         }
 
         public void DisableHook(Delegate original) {
             lock (this) {
+                ThrowIfDisposed();
                 if (!originalHookMapping.ContainsKey(original)) {
                     throw new KeyNotFoundException("Hook not found, was this delegate create with CreateHook?");
                 }
 
+                SetHookState(originalHookMapping[original], false);
+            }
+        }
+
+        void SetHookState(Hook hook, bool enable) {
+            if (hook.Enabled == enable) return;
+            try {
                 SuspendThreads();
-                originalHookMapping[original].Enable(false);
+                hook.Enable(enable);
+            } finally {
                 ResumeThreads();
             }
+        }
+
+        void ThrowIfDisposed() {
+            if (disposed) throw new ObjectDisposedException(nameof(HookEngine));
         }
 
         void SuspendThreads() {
 
             //Suspending all threads when debugging causes deadlocks.
             if (Debugger.IsAttached) {
-                return;
+                throw new NotSupportedException("Changing hooks while a managed debugger is attached is not supported.");
             }
 
             //TODO: Currently doesn't move thread IP if any of the threads
             //are executing within the location of a hook prologue at the time.
             //This will probably crash the program if that scenario happens (rare)
 
-            Process currentProc = Process.GetCurrentProcess();
-
-            foreach(ProcessThread thread in currentProc.Threads) {
-                if(thread.Id != GetCurrentThreadId()) {                    
-                    IntPtr threadHandle = OpenThread(ThreadAccess.SUSPEND_RESUME, false, (uint)thread.Id);
-                    SuspendThread(threadHandle);
-                    suspendedThreads.Add(threadHandle);                                       
-                }             
+            // Finish managed enumeration and buffer growth before suspending any thread.
+            using (Process currentProc = Process.GetCurrentProcess()) {
+                foreach (ProcessThread thread in currentProc.Threads) {
+                    using (thread) {
+                        if (thread.Id == GetCurrentThreadId()) continue;
+                        IntPtr handle = OpenThread(ThreadAccess.SUSPEND_RESUME, false, (uint)thread.Id);
+                        if (handle == IntPtr.Zero) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+                        try { suspendedThreads.Add(handle); }
+                        catch { CloseHandle(handle); throw; }
+                    }
+                }
+            }
+            while (suspendedThreadCount < suspendedThreads.Count) {
+                if (SuspendThread(suspendedThreads[suspendedThreadCount]) == -1) {
+                    int error = Marshal.GetLastWin32Error();
+                    ResumeThreads();
+                    throw new System.ComponentModel.Win32Exception(error);
+                }
+                suspendedThreadCount++;
             }
         }
 
         void ResumeThreads() {
 
-            foreach(var handle in suspendedThreads) {
-                ResumeThread(handle);
-                CloseHandle(handle);                    
+            int error = 0;
+            for (int i = 0; i < suspendedThreadCount; i++) {
+                if (ResumeThread(suspendedThreads[i]) == uint.MaxValue && error == 0) error = Marshal.GetLastWin32Error();
             }
-
+            suspendedThreadCount = 0;
+            foreach (IntPtr handle in suspendedThreads) {
+                if (!CloseHandle(handle) && error == 0) error = Marshal.GetLastWin32Error();
+            }
             suspendedThreads.Clear();
+            if (error != 0) throw new System.ComponentModel.Win32Exception(error);
         }
 
         public void Dispose() {
-            DisableHooks();
-            memoryAllocator.Dispose();
-            GC.SuppressFinalize(this);
+            lock (this) {
+                if (disposed) return;
+                DisableHooks();
+                memoryAllocator.Dispose();
+                originalHookMapping.Clear();
+                detourHookMapping.Clear();
+                hooksInCreationOrder.Clear();
+                disposed = true;
+                GC.SuppressFinalize(this);
+            }
         }
     }
 }

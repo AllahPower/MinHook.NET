@@ -9,6 +9,7 @@ namespace MinHook {
         public bool Enabled { get; private set; } = false;
         public bool QueueEnabled { get; private set; } = false;
         public IntPtr Original { get; private set; }
+        internal IntPtr Target { get { return trampoline.Target; } }
 
         Trampoline trampoline;
         
@@ -19,49 +20,51 @@ namespace MinHook {
 
         public void Enable(bool enable = true) {
 
+            if (Enabled == enable) return;
+
             MemoryProtection oldProtect;
-            long patchSize = Marshal.SizeOf(typeof(JMPCALL_REL));
+            int patchSize = RelativeJumpSize;
             IntPtr patchTarget = trampoline.Target;
 
             if (trampoline.PatchAbove) {
-                patchTarget = patchTarget - Marshal.SizeOf(typeof(JMPCALL_REL));
-                patchSize += Marshal.SizeOf(typeof(JMP_REL_SHORT));
+                patchTarget -= RelativeJumpSize;
+                patchSize += ShortJumpSize;
+            }
+
+            JMPCALL_REL jmp = new JMPCALL_REL(0xE9);
+            IntPtr destination = IntPtr.Size == 8 ? trampoline.Relay : trampoline.Detour;
+            jmp.SetOperand(unchecked((uint)((long)destination - ((long)patchTarget + RelativeJumpSize))));
+            JMP_REL_SHORT shortJmp = new JMP_REL_SHORT(0xEB, unchecked((byte)-(RelativeJumpSize + ShortJumpSize)));
+            bool ownsPatch = enable
+                ? NativeMemory.Equals(patchTarget, trampoline.Backup, patchSize)
+                : NativeMemory.Equals(patchTarget, ref jmp) &&
+                    (!trampoline.PatchAbove || NativeMemory.Equals(trampoline.Target, ref shortJmp));
+            if (!ownsPatch) {
+                throw new InvalidOperationException("Target bytes have changed. Remove newer hooks before changing this hook.");
             }
 
             if(!VirtualProtect(patchTarget, (UIntPtr)patchSize, MemoryProtection.ExecuteReadWrite, out oldProtect)) {
-                throw new Exception("Failed to change memory protection");
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "Failed to change memory protection");
             }
 
             if (enable) {
 
-                JMPCALL_REL jmp = new JMPCALL_REL(0xE9);
-
-                if (IntPtr.Size == 8) {
-                    long rel = ((long)trampoline.Relay - ((long)patchTarget + Marshal.SizeOf(jmp)));
-                    jmp.SetOperand((uint)rel);
-                } else {
-                    jmp.SetOperand((uint)((ulong)trampoline.Detour - ((ulong)patchTarget + (ulong)Marshal.SizeOf(jmp))));
-                }
-
-                Marshal.StructureToPtr(jmp, patchTarget, false);
+                NativeMemory.Write(patchTarget, ref jmp);
 
                 if (trampoline.PatchAbove) {
-                    JMP_REL_SHORT shortJmp = new JMP_REL_SHORT(0xEB, (byte)(0 - (Marshal.SizeOf(typeof(JMP_REL_SHORT)) + Marshal.SizeOf(jmp))));
-                    Marshal.StructureToPtr(shortJmp, trampoline.Target, false);
+                    NativeMemory.Write(trampoline.Target, ref shortJmp);
                 }
             } else {
 
-                if (trampoline.PatchAbove) {
-                    Marshal.Copy(trampoline.Backup, 0, patchTarget, Marshal.SizeOf(typeof(JMPCALL_REL)) + Marshal.SizeOf(typeof(JMP_REL_SHORT)));
-                } else {
-                    Marshal.Copy(trampoline.Backup, 0, patchTarget, Marshal.SizeOf(typeof(JMPCALL_REL)));
-                }
+                NativeMemory.Restore(patchTarget, trampoline.Backup, patchSize);
             }
 
-            VirtualProtect(patchTarget, (UIntPtr)patchSize, oldProtect, out _);
-
-            FlushInstructionCache((IntPtr)(-1), patchTarget, (UIntPtr)patchSize);
-            Enabled = true; 
+            Enabled = enable;
+            bool protectionRestored = VirtualProtect(patchTarget, (UIntPtr)patchSize, oldProtect, out _);
+            int protectionError = protectionRestored ? 0 : Marshal.GetLastWin32Error();
+            bool cacheFlushed = FlushInstructionCache((IntPtr)(-1), patchTarget, (UIntPtr)patchSize);
+            if (!protectionRestored) throw new System.ComponentModel.Win32Exception(protectionError, "Failed to restore memory protection");
+            if (!cacheFlushed) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "Failed to flush instruction cache");
         }
     }
 }
