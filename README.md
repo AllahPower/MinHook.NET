@@ -2,7 +2,7 @@
 
 ## Introduction
 
-MinHook.NET is a pure managed C# port of the brilliant MinHook library by Tsuda Kageyu (https://github.com/TsudaKageyu/minhook).  The library has the capability of inline hooking native API calls, utilising .NET delegates for both the detoured and original function that is commonly called with the detour.
+MinHook.NET is a C# port of MinHook by Tsuda Kageyu (https://github.com/TsudaKageyu/minhook), with .NET delegates for detours and original calls. This fork uses a small Windows x86/x64 native helper for thread suspension, instruction-pointer relocation, and patch transactions.
 
 The project has attempted to keep within the simplistic spirit of the original MinHook library.
 
@@ -53,35 +53,86 @@ without modifying the newer patch. Remove the newer layer first, then retry.
 Changes while a managed debugger is attached are rejected rather than silently
 patching running threads without suspension.
 
-Thread instruction pointers are not yet redirected when they point inside a
-patched prologue or trampoline. Concurrent patching and disposal therefore still
-require a separate thread-context fix; this branch does not claim to solve it.
-The managed suspension path also does not establish a process-wide GC-safe
-critical section or synchronize independent engines.
+Suspended threads use the same-process x86 or x64 Windows CONTEXT ABI, with aligned
+native storage allocated before suspension. Enabling maps original instruction
+boundaries into the trampoline; disabling maps them back, including hotpatch and
+x64 relay entries and the continuations emitted by expanded CALL/Jcc instructions.
+Disposal also checks previously disabled trampolines before releasing their pages.
+
+All contexts are captured and planned before any context is changed. Failed
+context writes or an unchanged patch failure trigger context rollback, and managed
+exceptions are created after the suspension set is resumed. Unknown instruction
+boundaries inside owned patch/trampoline regions and native failures are reported,
+not rounded or silently skipped.
+Rollback errors are reported as well; native access failures are not recoverable
+by pretending the update succeeded.
+
+The complete interval from first suspension to last resume runs in
+`MinHook.Threads.dll`, without managed callbacks, CLR calls, or heap allocations.
+Managed code prepares handles, instruction tables, and reusable native storage
+before entering the helper. Tiered compilation and GC remain enabled normally.
+Terminated threads are excluded only when their handle is signaled; failed
+`OpenThread` calls with an invalidated thread ID are distinct from access failures.
+
+This is not a stack walk or a callback-draining mechanism. A thread inside a
+callee may still have a return address into the trampoline, and code can retain an
+original delegate. Stop those callers and drain them before disposal. Independent
+engines are not coordinated, and threads created after enumeration are not covered
+by that enumeration. Do not modify code owned by another concurrently updating engine.
+
+Reference algorithms: [MinHook v1.3.4 FindOldIP/FindNewIP](https://github.com/TsudaKageyu/minhook/blob/v1.3.4/src/hook.c)
+and [Detours thread updates](https://github.com/microsoft/Detours/wiki/DetourUpdateThread).
+Windows requires stopped threads for [GetThreadContext](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getthreadcontext)
+and [SetThreadContext](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-setthreadcontext).
 
 ## Regression Tests
 
 The native regression suite uses xUnit v3 and Windows executable-memory fixtures.
-No game process, UI dialog, or external native binary is required. Run both process
-architectures with matching dotnet hosts:
+No game process or UI dialog is required. Build the helper with CMake and MSVC
+first, then run both process architectures with matching dotnet hosts:
 
 ```powershell
+./scripts/build-native.ps1
+
 dotnet build tests/MinHook.NET.Tests/MinHook.NET.Tests.csproj -c Release -p:TargetFrameworks=net9.0 -p:PlatformTarget=x64 -p:GeneratePackageOnBuild=false
 dotnet tests/MinHook.NET.Tests/bin/x64/Release/net9.0/MinHook.NET.Tests.dll
 dotnet build tests/MinHook.NET.Tests/MinHook.NET.Tests.csproj -c Release -p:TargetFrameworks=net9.0 -p:PlatformTarget=x86 -p:GeneratePackageOnBuild=false
 & "${env:ProgramFiles(x86)}/dotnet/dotnet.exe" tests/MinHook.NET.Tests/bin/x86/Release/net9.0/MinHook.NET.Tests.dll
 ```
 
-The allocation test covers warmed-up patch/restore operations, not hook creation
-or process-thread enumeration. Instruction encodings use stack buffers and typed
+Native worker tests run in a child process with a 30-second deadline. They cover
+real suspended OS threads, preserved stack/flags, original/trampoline migration,
+hotpatch and x64 relay/CALL/Jcc continuations, previously disabled trampolines,
+capture/write/patch failures, rollback, repeated concurrent enable/disable, and
+simultaneous compacting GC.
+
+The allocation tests cover warmed-up patch/restore and context capture/apply/
+rollback operations, not hook creation or process-thread enumeration. Context
+storage is reused and owned by the engine; its finalizable owner prevents native
+buffer leaks if an engine is abandoned. Instruction encodings use stack buffers and typed
 native writes: MemoryMarshal on .NET and .NET Standard, fixed pointers on .NET
-Framework. No runtime fallback or new library package dependency is introduced.
+Framework. There is no managed suspension fallback and no new NuGet dependency.
+The helper uses the static MSVC runtime; ship the matching `MinHook.Threads.dll`
+beside `MinHook.NET.dll`. NuGet packages include both native architectures under
+`runtimes/win-x86/native` and `runtimes/win-x64/native`. Direct DLL references must
+copy the helper explicitly, including into publish output. Missing or mismatched
+native binaries fail loading rather than silently switching implementation.
+
+An optional SDK ABI probe uses CMake/MSVC to check the declarations independently:
+
+```powershell
+cmake -S tests/ContextAbi -B artifacts/context-abi-x64 -A x64
+cmake --build artifacts/context-abi-x64 --config Release
+./artifacts/context-abi-x64/Release/context_abi.exe
+cmake -S tests/ContextAbi -B artifacts/context-abi-x86 -A Win32
+cmake --build artifacts/context-abi-x86 --config Release
+./artifacts/context-abi-x86/Release/context_abi.exe
+```
 
 ## TODO
 
-* When enabling hooks, enumerate threads and update thread context if any are running at the hook instructions that are being patched
-* Redirect thread instruction pointers when disabling hooks before freeing trampolines
-* Add concurrent native-worker stress tests in isolated child processes
+* Coordinate independent engines and define thread-creation synchronization
+* Define a callback-draining protocol for retained originals and pending native return addresses
 
 ## Thanks
 
